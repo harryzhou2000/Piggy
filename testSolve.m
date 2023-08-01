@@ -6,8 +6,8 @@ MI = spdiags(1./M(:),0,ndof,ndof);
 
 u0= [nodes(1,:) * 0; nodes(3,:) * 0; nodes(3,:) * 0];
 F0 = 0 * u0;
-F0(1,:) = 5e-3 * 0;
-dudt0 = [nodes(1,:) * 0; nodes(3,:) * 0.1; nodes(3,:) * 0];
+F0(1,:) = 5e-3 * 0; 
+dudt0 = [nodes(2,:) * 0.1; nodes(3,:) * 0; nodes(3,:) * 0];
 eta = 1e-5;
 C = eye(6) * 1e2;
 [iDofFix] = getDofFix(nodes);
@@ -191,7 +191,7 @@ s = reshape(s6([1 4 6 4 2 5 6 5 3]),[3,3]);
 end
 
 function [iDofFix] = getDofFix(nodes)
-iNodeFixB = abs(nodes(3,:) - 0) < 1e-5;
+iNodeFixB = abs(nodes(2,:) - 0) < 1e-5; % y == 0
 iNodes = 1:size(nodes,2);
 iNodeFix = iNodes(iNodeFixB);
 iDofFix = [(iNodeFix-1) * 3 + 1;(iNodeFix-1) * 3 + 2;(iNodeFix-1) * 3 + 3];

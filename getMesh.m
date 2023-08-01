@@ -1,16 +1,22 @@
 
-name = "testBar2";
+name = "testBar1";
 
 model = createpde('structural','modal-solid');
 
 model.importGeometry(name  + ".stl");
 
-ret = model.generateMesh('GeometricOrder','linear','Hmin',0.4)
-pdeplot3D(model.Mesh)
+
+ret = model.generateMesh('GeometricOrder','linear','Hmin',0.1)
+
 
 nodes = model.Mesh.Nodes;
-elems = model.Mesh.Elements;
+% from c4d stl out coord to -z-unity coord
+nodes(1,:) =  -nodes(1,:);
+nodes(2,:) = model.Mesh.Nodes(3,:);
+nodes(3,:) = model.Mesh.Nodes(2,:); %
 
+elems = model.Mesh.Elements;
+pdeplot3D(model.Mesh)
 
 %%
 

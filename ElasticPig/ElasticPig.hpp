@@ -2,14 +2,16 @@
 
 #include <cstdint>
 #include <vector>
-#include "eigen-3.4.0/Eigen/Dense"
 #include <iostream>
 #include <fstream>
 #include <string>
-#include "eigen-3.4.0/Eigen/SparseLU"
 #include <exception>
 #include <array>
 #include <functional>
+
+#include "eigen-3.4.0/Eigen/Dense"
+#include "eigen-3.4.0/Eigen/SparseLU"
+#include "nanoflann.hpp"
 
 namespace ElasticPig
 {
@@ -70,6 +72,40 @@ namespace ElasticPig
             return nodes.cols();
         }
 
+        void setCConstitutive(num E, num nu)
+        {
+            num mu = E / (2 * (1 + nu));
+            num la = nu * E / ((1 + nu) * (1 - 2 * nu));
+            C.setIdentity();
+            C *= 2 * mu;
+            C({0, 1, 2}, {0, 1, 2}) += Eigen::Matrix<num, 3, 3>::Constant(la);
+        }
+
+        void setEta(num nEta)
+        {
+            eta = nEta;
+        }
+
+        void setFExt(const TVecs &FextN)
+        {
+            fExt = FextN;
+        }
+
+        TVecs &getFExt()
+        {
+            return fExt;
+        }
+
+        TVecs &getU()
+        {
+            return u;
+        }
+
+        TVecs &getNodes()
+        {
+            return nodes;
+        }
+
         void ReadMeshInit(const std::string &fName)
         {
             std::cout << fName << std::endl;
@@ -85,7 +121,6 @@ namespace ElasticPig
             nodes.setZero(3, nNode);
             elems.setConstant(4, nElem, -1);
             u = v = fExt = f = nodes;
-           
 
             for (auto &i : nodes.reshaped())
                 file >> i;
@@ -93,7 +128,7 @@ namespace ElasticPig
                 file >> i;
             elems.array() -= 1; // to zero-based
 
-            v(1, Eigen::all) = nodes(2, Eigen::all) * 0.1;// init condition
+            v(0, Eigen::all) = nodes(1, Eigen::all) * 0.1; // init condition
         }
 
         void InitMassVol()
@@ -125,7 +160,7 @@ namespace ElasticPig
             flags.setConstant(3, this->getNumNode(), 1);
             for (ind iN = 0; iN < this->getNumNode(); iN++)
             {
-                if (std::abs(nodes(2, iN) - 0.0) < 1e-5)
+                if (std::abs(nodes(1, iN) - 0.0) < 1e-5) // y == 0
                     flags(Eigen::all, iN).setConstant(0);
             }
         }
@@ -338,4 +373,102 @@ namespace ElasticPig
             return ret;
         }
     };
+
+    struct TVecCloud : public TVecs
+    {
+        TVecCloud(TVecs &&r) : TVecs(r) {}
+        TVecCloud(const TVecs& r): TVecs(r) {}
+
+        ind kdtree_get_point_count() const { return this->cols(); }
+        num kdtree_get_pt(const size_t idx, const size_t dim) const
+        {
+            return this->operator()(dim, idx);
+        }
+        template <class BBOX>
+        bool kdtree_get_bbox(BBOX & /* bb */) const
+        {
+            return false;
+        }
+    };
+
+    class ModelMeshInterpolator
+    {
+    public:
+        using kd_tree_t = nanoflann::KDTreeSingleIndexAdaptor<
+            nanoflann::L2_Simple_Adaptor<num, TVecCloud>,
+            TVecCloud, 3>;
+        TVecs modelPoints;
+        TVecs modelForce;
+        TVecs modelDisp;
+
+        Eigen::Matrix<ind, Eigen::Dynamic, Eigen::Dynamic> modelP2meshP;
+
+        Eigen::Matrix<num, Eigen::Dynamic, Eigen::Dynamic> modelP2meshPWeight;
+
+        // int meshP2modelPSiz = 3;
+        int modelP2meshPSiz = 3;
+
+        TVecs &getModelPoints() { return modelPoints; }
+        TVecs &getModelForce() { return modelForce; }
+        TVecs &getModelDisp() { return modelDisp; }
+
+        void assignModelPoints(TVecs &nModelPoints)
+        {
+            modelPoints = nModelPoints;
+            modelForce.resizeLike(modelPoints);
+            modelDisp.resizeLike(modelPoints);
+            modelForce.setZero();
+        }
+
+        void buildMappingIndex(const TVecCloud &meshPoints)
+        {
+            static num geomEps = 1e-5;
+
+            kd_tree_t meshTree(3, meshPoints, {10});
+            modelP2meshP.resize(modelP2meshPSiz, modelPoints.cols());
+            modelP2meshPWeight.resizeLike(modelP2meshP);
+            for (ind iModelP = 0; iModelP < modelPoints.cols(); iModelP++)
+            {
+                Eigen::Vector<num, 3> qPoint = modelPoints(Eigen::all, iModelP);
+                size_t numResults = modelP2meshPSiz;
+                Eigen::Vector<uint32_t, Eigen::Dynamic> ret_index;
+                ret_index.resize(numResults);
+                Eigen::Vector<num, Eigen::Dynamic> out_dist_sqr;
+                out_dist_sqr.resize(numResults);
+                size_t gotResults = meshTree.knnSearch(qPoint.data(), numResults, ret_index.data(), out_dist_sqr.data());
+                if (gotResults < 1)
+                    std::abort;
+                for (size_t iR = gotResults; iR < numResults; iR++)
+                    ret_index[iR] = ret_index[0], out_dist_sqr[iR] = out_dist_sqr[0]; // patch results
+                Eigen::Vector<num, Eigen::Dynamic> weights = (out_dist_sqr.array() + geomEps).inverse();
+                weights /= weights.array().sum();
+
+                modelP2meshP(Eigen::all, iModelP) = ret_index.cast<ind>();
+                modelP2meshPWeight(Eigen::all, iModelP) = weights;
+            }
+        }
+
+        void interpolateForce2Mesh(TVecs &fMesh)
+        {
+            fMesh.setZero();
+            for (ind iModelP = 0; iModelP < modelPoints.cols(); iModelP++)
+            {
+                // std::cout << "here 1" << std::endl;
+                fMesh(Eigen::all, modelP2meshP(Eigen::all, iModelP)) +=
+                    modelForce(Eigen::all, iModelP) * modelP2meshPWeight(Eigen::all, iModelP).transpose();
+            }
+        }
+
+        void interpolateDisp2Model(const TVecs &u)
+        {
+            for (ind iModelP = 0; iModelP < modelPoints.cols(); iModelP++)
+            {
+                // std::cout << "here 2" << std::endl;
+                modelDisp(Eigen::all, iModelP) =
+                    u(Eigen::all, modelP2meshP(Eigen::all, iModelP)) *
+                    modelP2meshPWeight(Eigen::all, iModelP);
+            }
+        }
+    };
+
 }
